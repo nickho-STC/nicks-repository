@@ -41,6 +41,7 @@ OUT_DIR = os.path.join(HERE, "output")
 CHECK_DIR = os.path.join(OUT_DIR, "check_images")
 
 TEST_LIMIT = 10
+READER_VERSION = 2  # bump when the checkbox reader changes, so old saved readings are redone
 FILE_EXTS = (".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 
 # Spreadsheet column -> (header text, regex that finds the row label on the form)
@@ -238,7 +239,10 @@ def load_pages(path):
     """Yield page images (BGR numpy arrays)."""
     low = path.lower()
     if low.endswith(".pdf"):
-        import fitz
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            import fitz
         with fitz.open(path) as doc:
             for page in doc:
                 pix = page.get_pixmap(dpi=200)
@@ -285,14 +289,27 @@ def read_form(path):
 
 def read_table(img, tokens, header):
     h_line = header["y1"] - header["y0"]
+    # The form has other tables (Surgical History, Other History...) to the
+    # right of Patient History. Find where the next table starts so that we
+    # only ever look inside the Patient History table.
+    right_limit = float("inf")
+    for t in tokens:
+        if t is header or t["x0"] <= header["x1"]:
+            continue
+        near_header_line = abs((t["y0"] + t["y1"]) / 2 - (header["y0"] + header["y1"]) / 2) < 2.5 * h_line
+        if near_header_line and re.search(r"histor|surg", t["t"].lower()):
+            right_limit = min(right_limit, t["x0"] - 0.5 * h_line)
     # Tokens that belong to the table: below the header, within ~16 lines.
     below = [t for t in tokens
              if t["y0"] >= header["y0"] + 0.5 * h_line and t["y0"] <= header["y1"] + 16 * h_line * 1.9
-             and t["x1"] >= header["x0"] - 2 * h_line]
+             and t["x1"] >= header["x0"] - 2 * h_line and t["x0"] < right_limit]
 
     def label_row(pattern):
         for t in sorted(below, key=lambda t: t["y0"]):
             txt = t["t"].lower()
+            # row labels are left-aligned under the "Patient History" header
+            if t["x0"] > header["x0"] + 3 * h_line:
+                continue
             if re.search(pattern, txt) and not re.search(r"\byes\b", txt):
                 # avoid matching the "Coronary Stents" row for CAD's "coronary"
                 return t
@@ -329,10 +346,54 @@ def read_table(img, tokens, header):
     thr, _ = cv2.threshold(gray[ty0:ty1, tx0:tx1], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     thr = min(thr, 200)
 
+    # Pin down the boxes using the table's printed vertical grid lines:
+    #   | label | [] Yes | [] No |
+    # The OCR word positions are only a first guess (a check mark drawn over
+    # a box can make the OCR skip the box).
+    box_pos = "from OCR words"
+    gx0 = int(max(0, label_right - 2 * row_h))
+    gx1 = int(min(gray.shape[1], right_limit if right_limit != float("inf") else no_x + 6 * row_h))
+    if gx1 - gx0 > 4 * row_h and ty1 - ty0 > 4 * row_h:
+        dark = (gray[ty0:ty1, gx0:gx1] < thr).astype(np.uint8)
+        dark_w = cv2.dilate(dark, np.ones((1, 3), np.uint8))  # tolerate slight tilt
+        vk = max(10, int(2 * row_h))
+        vert = cv2.morphologyEx(dark_w, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, vk)))
+        cols = np.where(vert.sum(axis=0) > 0.4 * (ty1 - ty0))[0]
+        lines = []
+        for x in cols:
+            if lines and x - lines[-1][-1] <= 2:
+                lines[-1].append(x)
+            else:
+                lines.append([x])
+        lines = [gx0 + float(np.mean(l)) for l in lines]
+        l1 = [x for x in lines if x <= yes_x + 0.3 * row_h]
+        l2 = [x for x in lines if x > yes_x + row_h]
+        if l1 and l2:
+            L1, L2 = max(l1), min(l2)
+            # left edge of the printed Yes box = first strong dark column in the Yes cell
+            cell = dark[:, int(L1 - gx0 + 3):int(L2 - gx0 - 3)]
+            if cell.size:
+                prof = cell.sum(axis=0)
+                strong = np.where(prof >= 0.5 * prof.max())[0]
+                if len(strong):
+                    box_left = L1 + 3 + float(strong[0])
+                    if box_left < L1 + 0.6 * (L2 - L1):
+                        yes_x = box_left
+                        no_x = L2 + (box_left - L1)
+                        box_pos = "from table grid lines"
+
+    # distance between table rows, so a box area never reaches into the row above
+    ycs = sorted((t["y0"] + t["y1"]) / 2 for t in labels)
+    gaps = [b - a for a, b in zip(ycs, ycs[1:]) if b - a > 0.8 * row_h]
+    pitch = float(np.median(gaps)) if gaps else 2 * row_h
+
     def box_rect(x_left, lab):
+        # the box itself plus room above/right for check marks that sweep out of it
         yc = (lab["y0"] + lab["y1"]) / 2
-        return (int(x_left - 0.15 * row_h), int(yc - 0.95 * row_h),
-                int(x_left + 1.05 * row_h), int(yc + 0.65 * row_h))
+        up = min(1.4 * row_h, 0.5 * pitch)
+        down = min(0.65 * row_h, 0.45 * pitch)
+        return (int(x_left - 0.2 * row_h), int(yc - up),
+                int(x_left + 1.15 * row_h), int(yc + down))
 
     f = max(1.0, 40.0 / row_h)  # work at ~40 px per text line
 
@@ -345,7 +406,15 @@ def read_table(img, tokens, header):
         # darkness 0..1, with paper/background noise (lighter than the ink threshold) removed
         d = (255.0 - crop.astype(np.float32)) / 255.0
         paper = (255.0 - min(255.0, thr + 0.5 * (255 - thr))) / 255.0
-        return np.clip((d - paper) / max(1e-3, 1 - paper), 0, 1)
+        d = np.clip((d - paper) / max(1e-3, 1 - paper), 0, 1)
+        # erase the table's long printed grid lines (longer than any box edge)
+        b = (d > 0.4).astype(np.uint8)
+        k = max(8, int(1.5 * row_h * f))
+        grid = cv2.morphologyEx(b, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)))
+        grid |= cv2.morphologyEx(b, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, k)))
+        grid = cv2.dilate(grid, np.ones((5, 5), np.uint8))
+        d[grid > 0] = 0
+        return d
 
     all_rows = [r for r in list(rows.values()) + others if r is not None]
     crops = {}
@@ -383,11 +452,11 @@ def read_table(img, tokens, header):
     # how much "noise" an empty box shows on this particular scan.
     low = sorted(inks)[: max(2, len(inks) // 2)]
     empty = float(np.median(low))
-    noise = float(np.std(low))
+    noise = 1.4826 * float(np.median(np.abs(np.array(low) - empty)))  # robust to a stray mark
     gap = max(0.008, 4 * noise)
 
     out = {"values": {}, "detail": {}, "rects": [], "crop": (tx0, ty0, tx1, ty1),
-           "empty_ink": round(empty, 4)}
+           "empty_ink": round(empty, 4), "box_pos": box_pos}
     for col, _, _ in FIELDS:
         lab = rows[col]
         if lab is None:
@@ -594,7 +663,7 @@ def main():
 
         results = []
         for path in cands:
-            key = f"{path}|{os.path.getmtime(path) if os.path.exists(path) else 0}"
+            key = f"v{READER_VERSION}|{path}|{os.path.getmtime(path) if os.path.exists(path) else 0}"
             if key not in cache:
                 try:
                     res = read_form(path)
