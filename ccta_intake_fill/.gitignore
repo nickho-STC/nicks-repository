@@ -6,3 +6,5 @@ ocr_cache.json
 *.xlsx
 *.csv
 __pycache__/
+note_file_index.json
+note_ocr_cache.json

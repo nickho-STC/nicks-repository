@@ -43,3 +43,45 @@ OTHER
       PARTIAL: AD unclear    that cell left blank - check the form by hand
       NO INTAKE FILE FOUND   no ccta_intake file matched that patient
       "Matched by ... please check"  the folder matched on name only or ID only
+
+
+=========================================================================================
+CLINIC NOTES -> FILL BLANK CELLS AG:AN, AU:BA, CI, CJ
+=========================================================================================
+
+WHAT IT DOES
+  For every patient with a blank in AG-AN (Polysubstance Abuse ... Sleep Apnea),
+  AU-BA (Pre GLP-1 ... Pre Statin Dose), CI (SBP) or CJ (BMI), it finds the
+  files in their patient folder on S:\ (\\STC-NAC) whose name contains
+  "clinical note" or "progress note", reads them with OCR, finds the visit
+  dated right BEFORE the CCTA exam date, and fills ONLY the blank cells.
+  - A cell holding only a space counts as blank.
+  - Values are always one of the column's dropdown choices from the
+    Data Dictionary sheet (e.g. "None", "Rheumatoid arthritis (RA)",
+    "Not initiated", "20 mg").
+  - The "None"/"No"/"Not initiated" answers are used only when the note has the
+    section that would list it (PMH / A/P for conditions, Meds for drugs).
+  - Left blank for a person to check (listed in the review log):
+      * AW Pre GLP-1 Dose (low fixed vs titratable can't be read from a note)
+      * AV / AY durations when the patient's earlier notes don't show it
+        (on the drug at a visit 1+ year before the CCTA -> Long;
+         not on it at a visit within that year -> Short)
+      * a statin/GLP-1 that is not a dropdown choice (fluvastatin, liraglutide)
+        or a drug listed as stopped / intolerant
+      * anything only mentioned as "possible" / "rule out" / "evaluate for"
+  - The review log warns when the visit is more than 2 months (SBP) or 1 year
+    (BMI) before the CCTA, per the Data Dictionary.
+
+HOW TO RUN (after the one-time setup above)
+  5_NOTES_TEST_10_PATIENTS.bat      first 10 patients - check these first
+  6_NOTES_RUN_ALL_PATIENTS.bat      everyone
+  7_NOTES_CHOOSE_DIFFERENT_FILES.bat  pick another Excel file / folder and rescan
+  It uses the same Excel file and patient folder you chose before. If asked,
+  pick S:\ (or \\STC-NAC). The first run scans the drive once for note files.
+  To redo just some rows:  py fill_clinical_notes.py --rows 4249,4250
+
+  Output folder:
+    ..._NOTES_FILLED_....xlsx   new copy, yellow = newly filled cells
+    notes_review_log_....csv    one line per patient: visit used, every value
+                                and the note text it came from, or why blank
+    visit_text\                 the text the script read from each visit
