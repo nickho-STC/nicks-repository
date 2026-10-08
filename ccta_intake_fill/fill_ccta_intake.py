@@ -447,9 +447,7 @@ def col_num(letters):
 
 
 def write_workbook(src, dst, fills):
-    """fills: {row_number: {col_letter: value}}; value is text, a number, or
-    ("DATE", datetime.date) - written with the date format already used in that column.
-    A cell is "blank" when it is empty or holds only spaces."""
+    """fills: {row_number: {col_letter: 'Yes'/'No'}}"""
     with zipfile.ZipFile(src) as z:
         names = z.namelist()
         wb_xml = z.read("xl/workbook.xml").decode("utf-8")
@@ -460,16 +458,6 @@ def write_workbook(src, dst, fills):
         sheet_path = "xl/" + target.group(1).lstrip("/").replace("xl/", "", 1)
         sheet = z.read(sheet_path).decode("utf-8")
         styles = z.read("xl/styles.xml").decode("utf-8")
-        shared = z.read("xl/sharedStrings.xml").decode("utf-8") if "xl/sharedStrings.xml" in names else ""
-    # shared strings that are only whitespace (e.g. a non-breaking space) count as blank
-    sis = re.findall(r"<si>(.*?)</si>", shared, re.S)
-    blank_strings = {str(i) for i, si in enumerate(sis)
-                     if "".join(re.findall(r"<t[^>]*>([^<]*)</t>", si)).replace("&#160;", " ").strip() == ""}
-
-    def date_style(col):
-        m = re.search(r'<c r="%s\d+"[^>]*?\ss="(\d+)"(?:(?!t=)[^>])*>(?:<f>[^<]*</f>)?<v>\d{5}(?:\.\d+)?</v>' % col,
-                      sheet)
-        return int(m.group(1)) if m else None
 
     # --- styles: add a light-yellow fill and highlighted copies of used cell styles
     fills_m = re.search(r'<fills count="(\d+)">(.*?)</fills>', styles, re.S)
@@ -509,26 +497,14 @@ def write_workbook(src, dst, fills):
             if cm:
                 attrs = cm.group(1)
                 inner = cm.group(3) or ""
-                shared_blank = 't="s"' in attrs and re.fullmatch(r"<v>(\d+)</v>", inner.strip()) \
-                    and re.fullmatch(r"<v>(\d+)</v>", inner.strip()).group(1) in blank_strings
-                inline_blank = re.fullmatch(r"<is>\s*<t[^>]*>\s*</t>\s*</is>", inner.strip())
-                if re.search(r"<v>|<is>|<f>", inner) and not (shared_blank or inline_blank):
+                if re.search(r"<v>|<is>|<f>", inner):
                     continue  # cell has a value after all - never overwrite
                 sm = re.search(r'\ss="(\d+)"', attrs)
                 s = int(sm.group(1)) if sm else 0
             else:
                 s = 0
-            if isinstance(val, tuple) and val[0] == "DATE":
-                ds = date_style(col)
-                if ds is None:
-                    val = val[1].strftime("%m/%d/%Y")
-                else:
-                    val, s = (val[1] - dt.date(1899, 12, 30)).days, ds
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                new_c = f'<c r="{ref}" s="{highlighted_style(s)}"><v>{val}</v></c>'
-            else:
-                new_c = (f'<c r="{ref}" s="{highlighted_style(s)}" t="inlineStr">'
-                         f'<is><t>{escape(str(val))}</t></is></c>')
+            new_c = (f'<c r="{ref}" s="{highlighted_style(s)}" t="inlineStr">'
+                     f'<is><t>{escape(val)}</t></is></c>')
             if cm:
                 row = row[:cm.start()] + new_c + row[cm.end():]
             else:

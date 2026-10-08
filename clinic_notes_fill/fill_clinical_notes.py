@@ -29,7 +29,7 @@ import time
 
 import cv2
 
-from fill_ccta_intake import (OUT_DIR, SETTINGS_FILE, FILE_EXTS, TEST_LIMIT, find_files,
+from notes_common import (OUT_DIR, SETTINGS_FILE, FILE_EXTS, TEST_LIMIT, find_files,
                               load_json, load_pages, norm_words, pick_paths,
                               save_json, write_workbook)
 
