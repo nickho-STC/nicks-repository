@@ -1,0 +1,5 @@
+openpyxl
+numpy
+opencv-python
+pymupdf
+rapidocr_onnxruntime
